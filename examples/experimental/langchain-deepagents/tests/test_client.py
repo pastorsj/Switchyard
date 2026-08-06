@@ -101,7 +101,7 @@ async def test_client_invokes_target_with_algorithm_transformed_request() -> Non
     response = await client.call(request)
 
     assert [message.content for message in model.received_messages[0]] == [
-        "Injected by the router.",
+        [{"type": "text", "text": "Injected by the router."}],
         [{"type": "text", "text": "hello"}],
     ]
     assert model.received_options == [
@@ -117,7 +117,7 @@ async def test_client_invokes_target_with_algorithm_transformed_request() -> Non
                     },
                 }
             ],
-            "tool_choice": {"type": "function", "function": {"name": "lookup"}},
+            "tool_choice": "lookup",
             "temperature": 0.1,
             "max_tokens": 64,
             "stop": ["DONE"],

@@ -6,16 +6,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any
 
 from langchain.messages import AIMessage
 from langchain_core.language_models import BaseChatModel
 
-from .conversion import (
-    messages_from_request,
-    model_options_from_request,
-    response_from_ai_message,
-)
+from .request_mapper import SwitchyardRequestMapper
+from .response_mapper import SwitchyardResponseMapper
 
 
 class LangChainLlmClient:
@@ -36,25 +33,23 @@ class LangChainLlmClient:
         self,
         request: Mapping[str, object],
     ) -> Mapping[str, object]:
-        """Invoke the target with a buffered neutral request and return a neutral response."""
-        messages = messages_from_request(request)
-        tools, tool_choice, options = model_options_from_request(request)
-        stop_value = options.pop("stop", None)
-        if stop_value is not None:
-            if not isinstance(stop_value, list) or not all(
-                isinstance(item, str) for item in stop_value
-            ):
-                raise ValueError("extensions.fields.stop must be a list of strings")
-            stop = cast(list[str], stop_value)
-        else:
-            stop = None
+        """Invoke the target with a buffered Switchyard request."""
+        invocation = SwitchyardRequestMapper.from_switchyard(request)
 
         model: Any = self.model
-        if tools:
-            model = self.model.bind_tools(tools, tool_choice=cast(Any, tool_choice))
-        response = await model.ainvoke(messages, stop=stop, **options)
-        if not isinstance(response, AIMessage):
-            raise ValueError(
-                f"target returned {type(response).__name__} instead of AIMessage"
+        if invocation.tools:
+            model = self.model.bind_tools(
+                invocation.tools,
+                tool_choice=invocation.tool_choice,
             )
-        return response_from_ai_message(response, model_name=self._model_name())
+        response = await model.ainvoke(
+            invocation.messages,
+            stop=invocation.stop,
+            **invocation.options,
+        )
+        if not isinstance(response, AIMessage):
+            raise ValueError(f"target returned {type(response).__name__} instead of AIMessage")
+        return SwitchyardResponseMapper.to_switchyard(
+            response,
+            model_name=self._model_name(),
+        )

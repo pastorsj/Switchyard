@@ -61,11 +61,14 @@ def test_all_python_files_have_spdx_header() -> None:
         assert any(line == "# SPDX-License-Identifier: Apache-2.0" for line in first_lines), path
 
 
-def test_public_package_exports_only_the_two_adapters() -> None:
+def test_public_package_exports_adapters_and_mappers() -> None:
     import switchyard_langchain
 
     assert switchyard_langchain.__all__ == [
+        "LangChainInvocation",
         "LangChainLlmClient",
+        "SwitchyardRequestMapper",
+        "SwitchyardResponseMapper",
         "SwitchyardRoutingMiddleware",
     ]
 

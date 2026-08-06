@@ -115,7 +115,7 @@ async def test_async_middleware_routes_through_replacement_model_and_handler() -
     ]
 
 
-async def test_bound_tools_reach_the_neutral_algorithm_request() -> None:
+async def test_bound_tools_reach_the_switchyard_algorithm_request() -> None:
     algorithm = RecordingAlgorithm()
     middleware = SwitchyardRoutingMiddleware(algorithm)  # type: ignore[arg-type]
     tool = {
