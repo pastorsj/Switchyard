@@ -12,7 +12,5 @@ from .response_mapper import SwitchyardResponseMapper as SwitchyardResponseMappe
 __all__ = [
     "LangChainInvocation",
     "LangChainLlmClient",
-    "SwitchyardRequestMapper",
-    "SwitchyardResponseMapper",
     "SwitchyardRoutingMiddleware",
 ]
