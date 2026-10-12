@@ -233,6 +233,7 @@ recognized edit or write tool call. See [Plan/Execute Routing](../routing_algori
 | `planning_prompt` | No | packaged prompt | Replaces the planning instruction. |
 | `handoff_prompt` | No | unset | Adds an instruction to the handoff request. |
 | `planner_reasoning_as_text` | No | `false` | Converts visible planner reasoning summaries to assistant text at handoff. |
+| `strip_planner_reasoning` | No | `false` | Removes planner reasoning from the handoff and every later efficient-target request. Cannot be combined with `planner_reasoning_as_text`. |
 
 ### `prefill_router`
 

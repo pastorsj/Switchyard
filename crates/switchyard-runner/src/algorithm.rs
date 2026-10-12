@@ -372,6 +372,9 @@ pub enum AlgorithmSpec {
         /// Replays visible planner reasoning summaries as assistant text at handoff.
         #[serde(default)]
         planner_reasoning_as_text: bool,
+        /// Removes planner reasoning from every efficient-tier request.
+        #[serde(default)]
+        strip_planner_reasoning: bool,
     },
     /// Asks a judge model which target should serve the request.
     LlmClassifier {
@@ -1278,6 +1281,7 @@ fn build_algorithm(
             planning_prompt,
             handoff_prompt,
             planner_reasoning_as_text,
+            strip_planner_reasoning,
             ..
         } => {
             let mut config = PlanExecuteConfig::default();
@@ -1287,6 +1291,7 @@ fn build_algorithm(
             }
             config.handoff_prompt.clone_from(handoff_prompt);
             config.planner_reasoning_as_text = *planner_reasoning_as_text;
+            config.strip_planner_reasoning = *strip_planner_reasoning;
             let algorithm = PlanExecute::new(config).map_err(|error| {
                 AlgorithmConfigError::with_source(
                     format!("plan_execute route {route_name}: {error}"),

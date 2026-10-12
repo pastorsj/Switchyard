@@ -75,6 +75,7 @@ edit missing from the request history.
 | `planning_prompt` | Replaces the built-in planning instruction. |
 | `handoff_prompt` | Adds an instruction to the handoff request. |
 | `planner_reasoning_as_text` | Converts visible planner reasoning summaries to assistant text at handoff. |
+| `strip_planner_reasoning` | Removes planner reasoning from the handoff and every later efficient-target request. Cannot be combined with `planner_reasoning_as_text`. |
 
 To make a custom tool trigger handoff:
 

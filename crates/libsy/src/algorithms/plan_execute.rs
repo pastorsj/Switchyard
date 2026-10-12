@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use switchyard_protocol::{Category, ContentBlock, Request};
+use switchyard_protocol::{Category, ContentBlock, LlmRequest, Request, Role};
 
 use super::util::prompts::{append_note, drop_exact_replay, prepend_system_prompt};
 use super::util::tool_signals::{ToolSemantics, ToolSignals};
@@ -31,6 +31,8 @@ pub struct PlanExecuteConfig {
     pub handoff_prompt: Option<String>,
     /// Replays visible planner reasoning summaries as assistant text at handoff.
     pub planner_reasoning_as_text: bool,
+    /// Removes planner reasoning from every efficient-tier request, not just the handoff.
+    pub strip_planner_reasoning: bool,
 }
 
 impl Default for PlanExecuteConfig {
@@ -40,6 +42,7 @@ impl Default for PlanExecuteConfig {
             planning_prompt: DEFAULT_PLANNING_PROMPT.trim().to_string(),
             handoff_prompt: None,
             planner_reasoning_as_text: false,
+            strip_planner_reasoning: false,
         }
     }
 }
@@ -75,6 +78,12 @@ impl PlanExecute {
         {
             return Err(LibsyError::AlgorithmError {
                 message: "handoff_prompt must not be empty".to_string(),
+            });
+        }
+        if config.planner_reasoning_as_text && config.strip_planner_reasoning {
+            return Err(LibsyError::AlgorithmError {
+                message: "planner_reasoning_as_text and strip_planner_reasoning are exclusive"
+                    .to_string(),
             });
         }
         config.tool_semantics.validate()?;
@@ -150,6 +159,60 @@ impl PlanExecute {
         converted
     }
 
+    // The planner wrote every message up to and including the first mutation; the
+    // efficient model wrote everything after it. Clients resend the whole history on
+    // every turn, so this boundary is the same on the handoff and every later request.
+    fn planner_message_count(&self, request: &Request) -> usize {
+        request
+            .llm_request
+            .messages
+            .iter()
+            .position(|message| {
+                message.role == Role::Assistant
+                    && message
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, ContentBlock::ToolCall(_)))
+                    && self.mutates(message)
+            })
+            .map_or(0, |index| index + 1)
+    }
+
+    fn mutates(&self, message: &switchyard_protocol::Message) -> bool {
+        let request = Request {
+            llm_request: LlmRequest {
+                messages: vec![message.clone()],
+                ..LlmRequest::default()
+            },
+            ..Request::default()
+        };
+        let signals =
+            ToolSignals::from_request_with_semantics(&request, None, &self.config.tool_semantics);
+        signals.edit_count > 0 || signals.write_count > 0
+    }
+
+    // The efficient model otherwise receives the planner's reasoning as if it were its
+    // own on every request, and can imitate its style instead of reasoning in its own.
+    fn strip_planner_reasoning(&self, request: &mut Request) -> usize {
+        let planner_messages = self.planner_message_count(request);
+        let mut stripped = 0;
+        for message in &mut request.llm_request.messages[..planner_messages] {
+            let before = message.content.len();
+            message
+                .content
+                .retain(|block| !matches!(block, ContentBlock::Reasoning { .. }));
+            stripped += before - message.content.len();
+        }
+        if stripped > 0 {
+            request
+                .llm_request
+                .messages
+                .retain(|message| !message.content.is_empty());
+            drop_exact_replay(request);
+        }
+        stripped
+    }
+
     fn route_to(driver: &Driver, category: Category, request: Request) -> Result<RoutingOutcome> {
         let models = driver.models_for(&category);
         let Some((selected, fallbacks)) = models.split_first() else {
@@ -188,6 +251,11 @@ impl Algorithm for PlanExecute {
                 } else {
                     0
                 };
+                let reasoning_stripped = if self.config.strip_planner_reasoning {
+                    self.strip_planner_reasoning(&mut request)
+                } else {
+                    0
+                };
                 let prompt_applied = if let Some(prompt) = &self.config.handoff_prompt {
                     append_note(&mut request, prompt);
                     true
@@ -198,12 +266,22 @@ impl Algorithm for PlanExecute {
                     phase = "handoff",
                     handoff_prompt_applied = prompt_applied,
                     planner_reasoning_converted = reasoning_converted,
+                    planner_reasoning_stripped = reasoning_stripped,
                     "plan-execute selected efficient tier"
                 );
                 Self::route_to(&driver, Category::Efficient, request)
             }
             Phase::Execute => {
-                tracing::debug!(phase = "execute", "plan-execute selected efficient tier");
+                let reasoning_stripped = if self.config.strip_planner_reasoning {
+                    self.strip_planner_reasoning(&mut request)
+                } else {
+                    0
+                };
+                tracing::debug!(
+                    phase = "execute",
+                    planner_reasoning_stripped = reasoning_stripped,
+                    "plan-execute selected efficient tier"
+                );
                 Self::route_to(&driver, Category::Efficient, request)
             }
         }
@@ -357,6 +435,90 @@ mod tests {
         assert_eq!(selected, CAPABLE);
     }
 
+    fn reasoning(text: &str) -> ContentBlock {
+        ContentBlock::Reasoning {
+            text: text.to_string(),
+            signature: None,
+            details: vec![json!({"type": "reasoning", "encrypted_content": "opaque"})],
+        }
+    }
+
+    fn reasoning_texts(request: &Request) -> Vec<String> {
+        request
+            .llm_request
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::Reasoning { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn strips_planner_reasoning_on_every_execute_request() {
+        let algorithm = algorithm(PlanExecuteConfig {
+            strip_planner_reasoning: true,
+            ..PlanExecuteConfig::default()
+        });
+        let mut messages = vec![
+            Message::text(Role::User, "Fix the parser"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    reasoning("**Inspecting parser**"),
+                    ContentBlock::ToolCall(ToolCall {
+                        id: "call-1".to_string(),
+                        name: "exec_command".to_string(),
+                        arguments: json!({"cmd": "rg parser"}),
+                    }),
+                ],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    reasoning("**Patching boundary**"),
+                    ContentBlock::ToolCall(ToolCall {
+                        id: "call-2".to_string(),
+                        name: "apply_patch".to_string(),
+                        arguments: json!({"patch": "*** Begin Patch"}),
+                    }),
+                ],
+            },
+        ];
+
+        let mut handoff = request(messages.clone(), Some("task-1"));
+        handoff.llm_request.preservation.requests.insert(
+            "openai_responses".into(),
+            json!({"input": "verbatim inbound body"}),
+        );
+        let (selected, routed) = route_and_capture(Arc::clone(&algorithm), handoff).await;
+        assert_eq!(selected, EFFICIENT);
+        assert!(reasoning_texts(&routed).is_empty());
+        assert!(routed.llm_request.preservation.requests.is_empty());
+        assert_eq!(routed.llm_request.messages.len(), 3);
+
+        messages.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                reasoning("The executor checks the test output first."),
+                ContentBlock::ToolCall(ToolCall {
+                    id: "call-3".to_string(),
+                    name: "apply_patch".to_string(),
+                    arguments: json!({"patch": "*** Begin Patch"}),
+                }),
+            ],
+        });
+        let (selected, routed) =
+            route_and_capture(algorithm, request(messages, Some("task-1"))).await;
+        assert_eq!(selected, EFFICIENT);
+        assert_eq!(
+            reasoning_texts(&routed),
+            vec!["The executor checks the test output first.".to_string()]
+        );
+    }
+
     #[tokio::test]
     async fn capacity_preserves_execution_after_compaction() {
         let algorithm = algorithm(PlanExecuteConfig::default());
@@ -472,6 +634,11 @@ mod tests {
             },
             PlanExecuteConfig {
                 handoff_prompt: Some("  ".to_string()),
+                ..PlanExecuteConfig::default()
+            },
+            PlanExecuteConfig {
+                planner_reasoning_as_text: true,
+                strip_planner_reasoning: true,
                 ..PlanExecuteConfig::default()
             },
         ] {
